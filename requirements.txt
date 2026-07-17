@@ -1,0 +1,9 @@
+# GUI + 3D
+PySide6>=6.5
+PyOpenGL>=3.1
+numpy>=1.24
+
+# Die Roboter-SDK (unitree_sdk2_python) wird von install.sh direkt von
+# GitHub installiert, da sie nicht auf PyPI veröffentlicht ist:
+#   https://github.com/unitreerobotics/unitree_sdk2_python
+# Sie benötigt cyclonedds==0.10.2 (wird dort automatisch mitinstalliert).
