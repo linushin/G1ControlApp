@@ -12,6 +12,7 @@ Aufbau:
 from __future__ import annotations
 
 import logging
+import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
@@ -56,6 +57,9 @@ class MainWindow(QMainWindow):
         self.hand = PlaceholderHand()
         self.preview_q = np.zeros(NUM_JOINTS)   # Pose im Offline-Modus
         self.selected: int | None = None
+        self._last_status = ""                  # zuletzt gesetzter Statustext
+        self._status_override = ""              # z. B. NOT-AUS-Meldung …
+        self._status_override_until = 0.0       # … sichtbar bis (monotonic)
 
         self._build_toolbar()
         self._build_central()
@@ -153,6 +157,7 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         sb = QStatusBar()
         self.lbl_status = QLabel("Nicht verbunden")
+        self._last_status = "Nicht verbunden"
         sb.addWidget(self.lbl_status)
         self.lbl_sdk = QLabel("SDK: verfügbar" if sdk_available() else "SDK: nicht installiert (nur Simulation möglich)")
         sb.addPermanentWidget(self.lbl_sdk)
@@ -200,7 +205,7 @@ class MainWindow(QMainWindow):
             return
         self.robot = robot
         self.btn_connect.setText("Trennen")
-        self.lbl_status.setText(f"Verbunden: {robot.name}")
+        self._set_status(f"Verbunden: {robot.name}")
         LOG.info("Verbunden mit %s", robot.name)
         self._update_control_ui()
 
@@ -214,7 +219,7 @@ class MainWindow(QMainWindow):
         self.robot = None
         self.btn_control.setChecked(False)
         self.btn_connect.setText("Verbinden")
-        self.lbl_status.setText("Nicht verbunden")
+        self._set_status("Nicht verbunden")
         self._update_control_ui()
 
     def _toggle_control(self) -> None:
@@ -235,16 +240,18 @@ class MainWindow(QMainWindow):
 
     def _emergency(self) -> None:
         if self.robot is not None:
-            self.robot.emergency_damp()
-            # Nicht pauschal Erfolg melden: Wenn das Senden fehlschlägt,
-            # erreicht der Dämpfungsbefehl den Roboter nicht.
-            err = self.robot.state().error
-            if err:
-                self.lbl_status.setText(f"⚠ NOT-AUS angefordert — {err}")
+            # Rückgabewert statt Momentaufnahme von state().error: Der sagt,
+            # ob überhaupt eine Sendeschleife läuft; Sendefehler tauchen
+            # danach über state().error auf und haben im Ticker Vorrang.
+            if self.robot.emergency_damp():
+                self._show_status_override("NOT-AUS: Dämpfung wird gesendet", 4.0)
             else:
-                self.lbl_status.setText("NOT-AUS: Dämpfungsmodus aktiv")
+                self._show_status_override(
+                    "⚠ NOT-AUS: keine Low-Level-Steuerung aktiv — es wurden "
+                    "keine Befehle gesendet (Roboter ggf. per Fernbedienung "
+                    "stoppen)", 8.0)
         else:
-            self.lbl_status.setText("NOT-AUS (nicht verbunden)")
+            self._set_status("NOT-AUS (nicht verbunden)")
         self.btn_control.setChecked(False)
         LOG.warning("NOT-AUS ausgelöst.")
         self._update_control_ui()
@@ -304,7 +311,20 @@ class MainWindow(QMainWindow):
         self._send_target(index, q, sync_ui=True)
 
     # ------------------------------------------------------------- Ticker
-    def _update_control_ui(self) -> None:
+    def _set_status(self, text: str) -> None:
+        """Statuszeile setzen — nur bei tatsächlicher Änderung (Repaint sparen)."""
+        if text != self._last_status:
+            self._last_status = text
+            self.lbl_status.setText(text)
+
+    def _show_status_override(self, text: str, duration_s: float) -> None:
+        """Meldung für eine Haltezeit anzeigen, ohne dass der Ticker sie
+        im nächsten 33-ms-Zyklus überschreibt (Fehler haben Vorrang)."""
+        self._status_override = text
+        self._status_override_until = time.monotonic() + duration_s
+        self._set_status(text)
+
+    def _update_control_ui(self, state=None) -> None:
         connected = self.robot is not None
         if not connected:
             # Offline: Regler posieren das 3D-Modell
@@ -312,7 +332,9 @@ class MainWindow(QMainWindow):
             self.joint_panel.set_hint("Offline-Modus: Regler bewegen nur das 3D-Modell.")
             self.btn_control.setEnabled(False)
         else:
-            active = self.robot.state().control_active
+            if state is None:
+                state = self.robot.state()
+            active = state.control_active
             self.btn_control.setEnabled(True)
             self.joint_panel.set_slider_enabled(active)
             self.joint_panel.set_hint(
@@ -332,14 +354,16 @@ class MainWindow(QMainWindow):
             if self.selected is not None:
                 self.joint_panel.set_actual(float(state.q[self.selected]))
             if state.error:
-                self.lbl_status.setText(f"⚠ {state.error}")
+                self._set_status(f"⚠ {state.error}")
+            elif time.monotonic() < self._status_override_until:
+                self._set_status(self._status_override)
             elif state.control_active:
-                self.lbl_status.setText(f"Verbunden: {self.robot.name} — Steuerung AKTIV")
+                self._set_status(f"Verbunden: {self.robot.name} — Steuerung AKTIV")
             else:
-                self.lbl_status.setText(f"Verbunden: {self.robot.name} — Dämpfung/passiv")
+                self._set_status(f"Verbunden: {self.robot.name} — Dämpfung/passiv")
             if self.btn_control.isChecked() != state.control_active:
                 self.btn_control.setChecked(state.control_active)
-                self._update_control_ui()
+                self._update_control_ui(state)
         else:
             self.view.set_pose(self.preview_q)
             if self.selected is not None:

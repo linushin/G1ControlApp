@@ -82,7 +82,13 @@ class G1EthernetRobot(RobotInterface):
         self._cmd_q = np.zeros(NUM_JOINTS)      # aktuell gesendete Position
         self._damping = True                    # True => nur Dämpfung senden
         self._send_failed = False
-        self._hl_released = False               # High-Level-Dienst freigegeben?
+        self._release_issued = False            # ReleaseMode je abgesetzt?
+        # Empfangspuffer des DDS-Callbacks (nur vom Callback-Thread berührt).
+        self._temp_scalar: bool | None = None
+        self._rx_q = np.zeros(NUM_JOINTS)
+        self._rx_dq = np.zeros(NUM_JOINTS)
+        self._rx_tau = np.zeros(NUM_JOINTS)
+        self._rx_temp = np.zeros(NUM_JOINTS)
 
     # ------------------------------------------------------------------
     def connect(self) -> None:
@@ -115,6 +121,12 @@ class G1EthernetRobot(RobotInterface):
 
         self._crc = CRC()
         self._low_cmd = unitree_hg_msg_dds__LowCmd_()
+
+        # Zustand einer evtl. früheren Verbindung verwerfen — sonst
+        # "gelingt" die LowState-Wartschleife sofort am alten Zeitstempel.
+        self._last_state_time = 0.0
+        self._send_failed = False
+        self._release_issued = False
 
         self._subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self._subscriber.Init(self._on_low_state, 10)
@@ -150,11 +162,11 @@ class G1EthernetRobot(RobotInterface):
 
         Wird erst beim Aktivieren der Steuerung aufgerufen, damit das
         bloße Verbinden einen stehenden Roboter nicht aus der Balance
-        nimmt. Fehler werden nicht verschluckt: Solange die Freigabe
-        nicht bestätigt ist, darf kein rt/lowcmd gesendet werden.
+        nimmt — und bei JEDER Aktivierung erneut geprüft, da der Dienst
+        extern (Fernbedienung, Auto-Recovery) neu gestartet worden sein
+        kann. Fehler werden nicht verschluckt: Solange die Freigabe nicht
+        bestätigt ist, darf kein Positionsbefehl gesendet werden.
         """
-        if self._hl_released:
-            return
         try:
             from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
                 MotionSwitcherClient,
@@ -175,13 +187,13 @@ class G1EthernetRobot(RobotInterface):
                 )
             name = result.get("name") if result else ""
             if not name:
-                self._hl_released = True
                 return
             if time.time() > deadline:
                 raise RuntimeError(
                     f"High-Level-Dienst '{name}' ließ sich nicht freigeben — "
                     "Steuerung wird nicht aktiviert."
                 )
+            self._release_issued = True
             msc.ReleaseMode()
             time.sleep(1.0)
 
@@ -193,12 +205,16 @@ class G1EthernetRobot(RobotInterface):
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-            self._thread = None
+            if self._thread.is_alive():
+                # Referenz behalten: _start_loop darf keine zweite Schleife
+                # neben einer festhängenden alten starten.
+                LOG.error("Regelschleife beendet sich nicht binnen 2 s.")
+            else:
+                self._thread = None
         self._cleanup_channels()
         with self._lock:
             self._state.connected = False
             self._state.control_active = False
-        self._hl_released = False
 
     def _cleanup_channels(self) -> None:
         for ch in (self._subscriber, self._publisher):
@@ -212,15 +228,33 @@ class G1EthernetRobot(RobotInterface):
 
     # ------------------------------------------------------------------
     def _on_low_state(self, msg) -> None:
+        # Läuft mit 500 Hz: erst ohne Lock in eigene Puffer lesen, dann nur
+        # für die Bulk-Zuweisung sperren (kurzer kritischer Abschnitt).
+        ms = msg.motor_state
+        if self._temp_scalar is None:
+            self._temp_scalar = not hasattr(ms[0].temperature, "__len__")
+        q, dq, tau, temp = self._rx_q, self._rx_dq, self._rx_tau, self._rx_temp
+        if self._temp_scalar:
+            for i in range(NUM_JOINTS):
+                m = ms[i]
+                q[i] = m.q
+                dq[i] = m.dq
+                tau[i] = m.tau_est
+                temp[i] = m.temperature
+        else:
+            for i in range(NUM_JOINTS):
+                m = ms[i]
+                q[i] = m.q
+                dq[i] = m.dq
+                tau[i] = m.tau_est
+                temp[i] = m.temperature[0]
         with self._lock:
             self._mode_machine = msg.mode_machine
             self._state.mode_machine = msg.mode_machine
-            for i in range(NUM_JOINTS):
-                m = msg.motor_state[i]
-                self._state.q[i] = m.q
-                self._state.dq[i] = m.dq
-                self._state.tau[i] = m.tau_est
-                self._state.temperature[i] = m.temperature[0] if hasattr(m.temperature, "__len__") else m.temperature
+            self._state.q[:] = q
+            self._state.dq[:] = dq
+            self._state.tau[:] = tau
+            self._state.temperature[:] = temp
         # Erst nach dem Befüllen setzen: connect() wartet auf diesen Zeitstempel
         # und darf keinen leeren (Null-)Zustand als Pose übernehmen.
         self._last_state_time = time.time()
@@ -242,7 +276,19 @@ class G1EthernetRobot(RobotInterface):
                 "Keine aktuellen LowState-Daten — Verbindung prüfen, "
                 "Steuerung wird nicht aktiviert."
             )
-        self._release_high_level_service()
+        try:
+            self._release_high_level_service()
+        except Exception:
+            if self._release_issued:
+                # ReleaseMode wurde bereits abgesetzt: Der High-Level-Dienst
+                # ist evtl. schon gestoppt. Den Roboter nicht reglerlos
+                # lassen — wenigstens Dämpfung streamen.
+                with self._lock:
+                    self._damping = True
+                    self._state.error = ("Freigabe unklar — Dämpfung wird "
+                                         "vorsorglich gesendet.")
+                self._start_loop()
+            raise
         with self._lock:
             self._cmd_q = self._state.q.copy()
             self._state.targets = self._state.q.copy()
@@ -256,18 +302,32 @@ class G1EthernetRobot(RobotInterface):
             self._damping = True
             self._state.control_active = False
 
-    def emergency_damp(self) -> None:
+    def emergency_damp(self) -> bool:
         with self._lock:
             self._damping = True
             self._state.control_active = False
             self._state.targets = self._state.q.copy()
+        # Dämpfung erreicht den Roboter nur über eine laufende Sendeschleife;
+        # ohne je aktivierte Steuerung wurde nichts gesendet (und das ist
+        # richtig so — der Roboter läuft dann noch unter eigener Regelung).
+        return self._running and self._thread is not None and self._thread.is_alive()
 
     # ------------------------------------------------------------------
     def _start_loop(self) -> None:
-        if self._thread is None or not self._thread.is_alive():
-            self._running = True
-            self._thread = threading.Thread(target=self._control_loop, daemon=True)
-            self._thread.start()
+        if self._thread is not None and self._thread.is_alive():
+            if self._running:
+                return
+            # Alte Schleife läuft noch aus (Join im disconnect lief ins
+            # Timeout) — keine zweite parallel dazu starten.
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise RuntimeError(
+                    "Die vorherige Regelschleife beendet sich nicht — "
+                    "bitte die App neu starten."
+                )
+        self._running = True
+        self._thread = threading.Thread(target=self._control_loop, daemon=True)
+        self._thread.start()
 
     def _control_loop(self) -> None:
         dt = 1.0 / self.RATE_HZ
@@ -318,7 +378,11 @@ class G1EthernetRobot(RobotInterface):
         except Exception as exc:
             self._send_failed = True
             with self._lock:
-                self._state.error = f"Senden fehlgeschlagen: {exc}"
+                # Eine bestehende Zustandsmeldung (z. B. vom Watchdog)
+                # nicht überschreiben — sie ginge beim nächsten
+                # erfolgreichen Senden mit verloren.
+                if not self._state.error or self._state.error.startswith("Senden fehlgeschlagen"):
+                    self._state.error = f"Senden fehlgeschlagen: {exc}"
         else:
             if self._send_failed:
                 # Senden funktioniert wieder — veralteten Fehler löschen.

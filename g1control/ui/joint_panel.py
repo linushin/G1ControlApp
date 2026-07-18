@@ -88,6 +88,10 @@ class JointPanel(QWidget):
         self.spin_deg.setSuffix(" °")
         self.spin_deg.setDecimals(1)
         self.spin_deg.setSingleStep(1.0)
+        # Erst beim Bestätigen (Enter/Fokuswechsel) senden — sonst gehen
+        # beim Tippen von "150" die Zwischenwerte 1° und 15° als echte
+        # Sollwerte an den Roboter.
+        self.spin_deg.setKeyboardTracking(False)
         self.spin_deg.valueChanged.connect(self._on_spin)
         self.lbl_rad = QLabel("")
         spin_row.addWidget(self.spin_deg)

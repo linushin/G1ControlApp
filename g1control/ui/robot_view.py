@@ -80,6 +80,9 @@ class RobotView(QOpenGLWidget):
         self._last_pos = None
         self._dragged = False
         self._sphere = _unit_sphere()
+        self._sphere_list = None      # GL-Displayliste der Einheitskugel
+        self._transforms = None       # FK-Cache, ungültig bei Posenänderung
+        self._pick_fbo = None         # wiederverwendetes Picking-FBO
         self.setMinimumSize(480, 480)
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -87,7 +90,15 @@ class RobotView(QOpenGLWidget):
     def set_pose(self, q: np.ndarray) -> None:
         if not np.array_equal(q, self.q):
             self.q = np.asarray(q, dtype=float).copy()
+            self._transforms = None
             self.update()
+
+    def _get_transforms(self):
+        """FK nur neu rechnen, wenn sich die Pose geändert hat — Kamera-
+        Drags und Picking nutzen denselben Cache."""
+        if self._transforms is None:
+            self._transforms = self.kin.forward(self.q)
+        return self._transforms
 
     def set_selected(self, index: int | None) -> None:
         if index != self.selected:
@@ -105,6 +116,17 @@ class RobotView(QOpenGLWidget):
         glLightfv(GL_LIGHT0, GL_AMBIENT, (0.35, 0.35, 0.35, 1.0))
         glEnable(GL_COLOR_MATERIAL)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        # Einheitskugel einmal in eine Displayliste kompilieren: Spart pro
+        # Frame ~50.000 Python-GL-Aufrufe (840 Vertices x 30 Kugeln).
+        self._sphere_list = glGenLists(1)
+        glNewList(self._sphere_list, GL_COMPILE)
+        glBegin(GL_TRIANGLES)
+        for v in self._sphere:
+            glNormal3f(*v)
+            glVertex3f(*v)
+        glEnd()
+        glEndList()
+        self._pick_fbo = None  # FBO gehört zum (ggf. neuen) Kontext
 
     def resizeGL(self, w: int, h: int) -> None:
         glViewport(0, 0, max(w, 1), max(h, 1))
@@ -128,8 +150,8 @@ class RobotView(QOpenGLWidget):
     def paintGL(self) -> None:
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._apply_camera()
-        transforms = self.kin.forward(self.q)
-        pos = {name: t[:3, 3] for name, t in transforms.items()}
+        transforms = self._get_transforms()
+        pos = self.kin.positions_from(transforms)
 
         self._draw_ground()
         self._draw_bones(pos)
@@ -195,11 +217,7 @@ class RobotView(QOpenGLWidget):
         glPushMatrix()
         glTranslatef(*p)
         glScalef(radius, radius, radius)
-        glBegin(GL_TRIANGLES)
-        for v in self._sphere:
-            glNormal3f(*v)
-            glVertex3f(*v)
-        glEnd()
+        glCallList(self._sphere_list)
         glPopMatrix()
 
     # ------------------------------------------------------------ Picking
@@ -209,9 +227,12 @@ class RobotView(QOpenGLWidget):
         self.makeCurrent()
         ratio = self.devicePixelRatio()
         w, h = int(self.width() * ratio), int(self.height() * ratio)
-        fmt = QOpenGLFramebufferObjectFormat()
-        fmt.setAttachment(QOpenGLFramebufferObject.CombinedDepthStencil)
-        fbo = QOpenGLFramebufferObject(w, h, fmt)  # ohne Multisampling => lesbar
+        if self._pick_fbo is None or self._pick_fbo.width() != w or self._pick_fbo.height() != h:
+            fmt = QOpenGLFramebufferObjectFormat()
+            fmt.setAttachment(QOpenGLFramebufferObject.CombinedDepthStencil)
+            # ohne Multisampling => lesbar; über Klicks hinweg wiederverwendet
+            self._pick_fbo = QOpenGLFramebufferObject(w, h, fmt)
+        fbo = self._pick_fbo
         fbo.bind()
         glViewport(0, 0, w, h)
         glDisable(GL_MULTISAMPLE)
@@ -220,7 +241,7 @@ class RobotView(QOpenGLWidget):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._apply_camera()
         glDisable(GL_LIGHTING)
-        pos = self.kin.positions(self.q)
+        pos = self.kin.positions_from(self._get_transforms())
         for spec in JOINTS:
             glColor3ub(spec.index + 1, 0, 0)
             self._sphere_at(pos[self.kin.joint_nodes[spec.index]], PICK_RADIUS)

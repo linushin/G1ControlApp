@@ -55,10 +55,11 @@ class MockRobot(RobotInterface):
         with self._lock:
             self._state.control_active = False
 
-    def emergency_damp(self) -> None:
+    def emergency_damp(self) -> bool:
         with self._lock:
             self._state.control_active = False
             self._state.targets = self._state.q.copy()
+            return self._state.connected
 
     def _loop(self) -> None:
         dt = 1.0 / self.RATE_HZ

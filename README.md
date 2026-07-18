@@ -16,10 +16,12 @@ offizielle [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2
 > Gelenktests **aufhängen oder sicher lagern** (Debug-/Entwicklungsmodus laut
 > Unitree-Handbuch), Umfeld freihalten und die Funk-Fernbedienung als
 > zusätzlichen Not-Aus bereithalten. Der Button **NOT-AUS (Dämpfung)** schaltet
-> alle Motoren sofort auf reine Dämpfung (kp = 0). Das **Verbinden ist passiv**
-> (es wird nur gelesen); Befehle fließen erst nach **Steuerung aktivieren**.
-> Fällt das LowState-Feedback während aktiver Steuerung aus, schaltet ein
-> **Watchdog** automatisch in die Dämpfung.
+> alle Motoren sofort auf reine Dämpfung (kp = 0), sobald die App Low-Level-
+> Befehle sendet (ab **Steuerung aktivieren**). Das **Verbinden ist passiv**
+> (es wird nur gelesen); vorher sendet die App grundsätzlich keine Befehle —
+> in dem Fall meldet der NOT-AUS-Button das ehrlich und der Roboter wird über
+> die Funk-Fernbedienung gestoppt. Fällt das LowState-Feedback während aktiver
+> Steuerung aus, schaltet ein **Watchdog** automatisch in die Dämpfung.
 
 ## Installation (Ubuntu 22.04)
 

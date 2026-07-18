@@ -106,8 +106,14 @@ class RobotInterface(ABC):
             self._state.targets[joint_index] = q
 
     @abstractmethod
-    def emergency_damp(self) -> None:
-        """NOT-AUS: sofort alle Gelenke in den Dämpfungsmodus."""
+    def emergency_damp(self) -> bool:
+        """NOT-AUS: sofort alle Gelenke in den Dämpfungsmodus.
+
+        Rückgabe ``True``, wenn der Dämpfungsbefehl den Roboter auch
+        tatsächlich erreicht (Sendeschleife läuft); ``False``, wenn keine
+        Befehle gesendet werden (z. B. Steuerung nie aktiviert) — die UI
+        muss das dem Bediener ehrlich anzeigen.
+        """
 
     # --- Hilfen für Backends -------------------------------------------
     @staticmethod
