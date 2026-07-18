@@ -55,10 +55,13 @@ Unitree-Repository (nicht auf PyPI verfügbar); dabei wird auch
    rechts erscheint das Menü mit Schieberegler, Gradzahl-Eingabe und den
    offiziellen Grenzwerten. Drehen: linke Maustaste ziehen, Zoom: Mausrad,
    Verschieben: rechte Maustaste.
-4. **Steuerung aktivieren** — ein laufender High-Level-Bewegungsdienst wird
-   über den `MotionSwitcherClient` freigegeben (schlägt die Freigabe fehl,
-   wird die Steuerung **nicht** aktiviert), die aktuelle Pose wird als
-   Sollwert übernommen und gehalten (PD-Regelung, 500 Hz). Ab jetzt bewegt
+4. **Steuerung aktivieren** — vor der ersten Aktivierung fragt die App eine
+   **Sicherheitsbestätigung** ab (der Balance-Dienst wird beendet und kann
+   von der App nicht neu gestartet werden — Roboter aufhängen!). Danach wird
+   ein laufender High-Level-Bewegungsdienst über den `MotionSwitcherClient`
+   freigegeben (schlägt die Freigabe fehl, wird die Steuerung **nicht**
+   aktiviert), die aktuelle Pose wird als Sollwert übernommen und gehalten
+   (PD-Regelung, 500 Hz). Ab jetzt bewegt
    der Schieberegler das gewählte Gelenk; Sollwerte werden auf die
    Gelenkgrenzen begrenzt und mit maximal 0,6 rad/s angefahren
    (Slew-Rate-Begrenzung). Bei ausbleibendem `rt/lowstate` schaltet der

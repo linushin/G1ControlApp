@@ -12,6 +12,7 @@ Aufbau:
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 import numpy as np
@@ -60,6 +61,7 @@ class MainWindow(QMainWindow):
         self._last_status = ""                  # zuletzt gesetzter Statustext
         self._status_override = ""              # z. B. NOT-AUS-Meldung …
         self._status_override_until = 0.0       # … sichtbar bis (monotonic)
+        self._enable_confirmed = False          # Sicherheitsdialog bestätigt?
 
         self._build_toolbar()
         self._build_central()
@@ -204,6 +206,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Verbindung fehlgeschlagen", str(exc))
             return
         self.robot = robot
+        self._status_override_until = 0.0   # Meldungen alter Verbindungen verwerfen
+        self._enable_confirmed = False
         self.btn_connect.setText("Trennen")
         self._set_status(f"Verbunden: {robot.name}")
         LOG.info("Verbunden mit %s", robot.name)
@@ -217,6 +221,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             LOG.warning("Fehler beim Trennen: %s", exc)
         self.robot = None
+        self._status_override_until = 0.0   # Meldung gilt nur für die alte Verbindung
+        self._enable_confirmed = False
         self.btn_control.setChecked(False)
         self.btn_connect.setText("Verbinden")
         self._set_status("Nicht verbunden")
@@ -226,6 +232,25 @@ class MainWindow(QMainWindow):
         if self.robot is None:
             self.btn_control.setChecked(False)
             return
+        if (self.btn_control.isChecked()
+                and self.robot.NEEDS_ENABLE_CONFIRMATION
+                and not self._enable_confirmed):
+            ret = QMessageBox.warning(
+                self, "Low-Level-Steuerung aktivieren?",
+                "Der High-Level-Bewegungsdienst des Roboters (z. B. Balance) "
+                "wird beendet und die App übernimmt die Low-Level-Steuerung. "
+                "Die App kann den Dienst NICHT wieder starten.\n\n"
+                "Ein stehender Roboter fällt dabei um — spätestens beim "
+                "Deaktivieren (Dämpfung).\n\n"
+                "Nur fortfahren, wenn der Roboter aufgehängt bzw. sicher "
+                "gelagert ist und das Umfeld frei ist (siehe README, "
+                "Abschnitt Sicherheit).",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if ret != QMessageBox.Yes:
+                self.btn_control.setChecked(False)
+                self._update_control_ui()
+                return
+            self._enable_confirmed = True
         try:
             if self.btn_control.isChecked():
                 self.robot.enable_control()
@@ -296,6 +321,11 @@ class MainWindow(QMainWindow):
         self._send_target(index, q, sync_ui=False)
 
     def _send_target(self, index: int, q: float, sync_ui: bool) -> None:
+        if not math.isfinite(q):
+            # NaN/Inf (z. B. aus defekten Roboterdaten via „Ist übernehmen“)
+            # niemals als Sollwert weiterreichen.
+            self._set_status("⚠ Ungültiger Sollwert (NaN/Inf) verworfen.")
+            return
         if self.robot is not None:
             self.robot.set_target(index, q)
         else:
@@ -353,10 +383,17 @@ class MainWindow(QMainWindow):
             self.view.set_pose(state.q)
             if self.selected is not None:
                 self.joint_panel.set_actual(float(state.q[self.selected]))
-            if state.error:
+            if time.monotonic() < self._status_override_until:
+                # Die NOT-AUS-Meldung muss sichtbar bleiben — gerade WENN
+                # Fehler anstehen (totes Kabel erzeugt immer einen error und
+                # würde die Handlungsanweisung sonst nach 33 ms verdecken).
+                # Der Fehler wird angehängt statt zu verdrängen.
+                if state.error:
+                    self._set_status(f"{self._status_override}  ({state.error})")
+                else:
+                    self._set_status(self._status_override)
+            elif state.error:
                 self._set_status(f"⚠ {state.error}")
-            elif time.monotonic() < self._status_override_until:
-                self._set_status(self._status_override)
             elif state.control_active:
                 self._set_status(f"Verbunden: {self.robot.name} — Steuerung AKTIV")
             else:

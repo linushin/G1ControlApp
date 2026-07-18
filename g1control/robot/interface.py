@@ -16,6 +16,7 @@ Simulation und echter Roboter garantiert dieselbe Logik verwenden.
 from __future__ import annotations
 
 import dataclasses
+import math
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -56,6 +57,10 @@ class RobotInterface(ABC):
 
     #: Maximale Verfahrgeschwindigkeit der Sollwerte [rad/s] (Slew-Rate).
     MAX_SPEED = 0.6
+
+    #: True => die UI holt vor der ersten Aktivierung eine Sicherheits-
+    #: bestätigung ein (echter Roboter: Balance-Dienst wird beendet).
+    NEEDS_ENABLE_CONFIRMATION = False
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -99,8 +104,14 @@ class RobotInterface(ABC):
         """Sollposition eines Gelenks setzen.
 
         Wird auf die offiziellen Gelenkgrenzen begrenzt und vom Backend
-        mit begrenzter Geschwindigkeit angefahren.
+        mit begrenzter Geschwindigkeit angefahren. NaN/Inf werden
+        abgewiesen — ``np.clip`` würde NaN ungehindert durchreichen und
+        der Wert würde bei vollem kp an den Roboter gestreamt.
         """
+        q = float(q)
+        if not math.isfinite(q):
+            raise ValueError(
+                f"Ungültiger Sollwert für Gelenk {joint_index}: {q!r}")
         q = float(np.clip(q, LOWER[joint_index], UPPER[joint_index]))
         with self._lock:
             self._state.targets[joint_index] = q
@@ -119,7 +130,15 @@ class RobotInterface(ABC):
     @staticmethod
     def _slew_step(current: np.ndarray, targets: np.ndarray,
                    max_speed: float, dt: float) -> np.ndarray:
-        """Ein Slew-Rate-begrenzter Schritt von ``current`` Richtung
-        ``targets``, immer innerhalb der Gelenkgrenzen."""
-        step = np.clip(targets - current, -max_speed * dt, max_speed * dt)
-        return np.clip(current + step, LOWER, UPPER)
+        """Ein Slew-Rate-begrenzter Schritt von ``current`` Richtung der
+        (auf die Gelenkgrenzen geklemmten) ``targets``.
+
+        Bewusst KEIN Clip der Position selbst: Steht ein Gelenk physisch
+        außerhalb der Tabellengrenzen (Kalibrierungsversatz), würde ein
+        Positions-Clip den Befehl in einem einzigen Zyklus auf die Grenze
+        teleportieren — ein unratenbegrenzter Ruck bei vollem kp. So wird
+        die Pose stattdessen ratenbegrenzt in die Grenzen zurückgeführt.
+        """
+        step = np.clip(np.clip(targets, LOWER, UPPER) - current,
+                       -max_speed * dt, max_speed * dt)
+        return current + step
