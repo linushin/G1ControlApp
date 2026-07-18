@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 
 class G1JointIndex:
     """Motor-Indizes des G1 (29 DOF), identisch zur offiziellen SDK-Belegung."""
@@ -131,6 +133,13 @@ assert [j.index for j in JOINTS] == list(range(NUM_JOINTS))
 
 BY_URDF_NAME = {j.urdf_name: j for j in JOINTS}
 BY_INDEX = {j.index: j for j in JOINTS}
+
+# Grenzen und Standard-Gains als Arrays (Position = Motorindex) — die eine
+# gemeinsame Quelle für alle Backends, damit Clamping nirgends driftet.
+LOWER = np.array([j.lower for j in JOINTS])
+UPPER = np.array([j.upper for j in JOINTS])
+KP = np.array([j.kp for j in JOINTS])
+KD = np.array([j.kd for j in JOINTS])
 
 
 def joints_in_group(group: str) -> list[JointSpec]:

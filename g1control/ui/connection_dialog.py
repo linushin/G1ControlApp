@@ -7,6 +7,7 @@ dauerhaft gespeichert.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -38,8 +39,12 @@ class ConnectionDialog(QDialog):
     def __init__(self, store: ProfileStore, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Roboter verwalten")
+        # Auf einer Kopie arbeiten: Erst OK übernimmt die Änderungen in den
+        # geteilten Store — „Abbrechen“ verwirft sie damit wirklich.
         self.store = store
+        self.work = copy.deepcopy(store)
         self._current = -1
+        self._loading = False
 
         layout = QHBoxLayout(self)
 
@@ -91,29 +96,38 @@ class ConnectionDialog(QDialog):
         layout.addLayout(right, 2)
 
         self._reload_list()
-        self.list.setCurrentRow(self.store.active)
+        self.list.setCurrentRow(self.work.active)
 
     # ------------------------------------------------------------------
     def _reload_list(self) -> None:
         self.list.blockSignals(True)
         self.list.clear()
-        for p in self.store.profiles:
+        for p in self.work.profiles:
             self.list.addItem(f"{p.name}  [{p.interface}]")
         self.list.blockSignals(False)
 
     def _on_select(self, row: int) -> None:
         self._apply_fields()
         self._current = row
-        if 0 <= row < len(self.store.profiles):
-            p = self.store.profiles[row]
-            self.ed_name.setText(p.name)
-            self.cb_iface.setCurrentText(p.interface)
-            self.sp_domain.setValue(p.domain_id)
+        if 0 <= row < len(self.work.profiles):
+            p = self.work.profiles[row]
+            # Während die Felder befüllt werden, lösen setText/setValue
+            # ihre Change-Signale aus — _apply_fields darf dann nicht mit
+            # halb aktualisierten Feldern ins neue Profil schreiben.
+            self._loading = True
+            try:
+                self.ed_name.setText(p.name)
+                self.cb_iface.setCurrentText(p.interface)
+                self.sp_domain.setValue(p.domain_id)
+            finally:
+                self._loading = False
 
     def _apply_fields(self) -> None:
+        if self._loading:
+            return
         row = self._current
-        if 0 <= row < len(self.store.profiles):
-            p = self.store.profiles[row]
+        if 0 <= row < len(self.work.profiles):
+            p = self.work.profiles[row]
             if self.ed_name.text().strip():
                 p.name = self.ed_name.text().strip()
             if self.cb_iface.currentText().strip():
@@ -125,24 +139,29 @@ class ConnectionDialog(QDialog):
 
     def _add(self) -> None:
         self._apply_fields()
-        self.store.profiles.append(RobotProfile(name=f"G1 #{len(self.store.profiles) + 1}"))
+        self.work.profiles.append(RobotProfile(name=f"G1 #{len(self.work.profiles) + 1}"))
         self._reload_list()
-        self.list.setCurrentRow(len(self.store.profiles) - 1)
+        self.list.setCurrentRow(len(self.work.profiles) - 1)
 
     def _remove(self) -> None:
         row = self.list.currentRow()
-        if len(self.store.profiles) <= 1 or row < 0:
+        if len(self.work.profiles) <= 1 or row < 0:
             return
         self._current = -1
-        del self.store.profiles[row]
-        self.store.active = min(self.store.active, len(self.store.profiles) - 1)
+        del self.work.profiles[row]
+        # Aktiv-Index mitführen: Löschen oberhalb verschiebt die Indizes.
+        if row < self.work.active:
+            self.work.active -= 1
+        self.work.active = min(self.work.active, len(self.work.profiles) - 1)
         self._reload_list()
-        self.list.setCurrentRow(0)
+        self.list.setCurrentRow(min(row, len(self.work.profiles) - 1))
 
     def _accept(self) -> None:
         self._apply_fields()
         row = self.list.currentRow()
         if row >= 0:
-            self.store.active = row
+            self.work.active = row
+        self.store.profiles = self.work.profiles
+        self.store.active = self.work.active
         self.store.save()
         self.accept()

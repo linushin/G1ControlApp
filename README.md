@@ -16,7 +16,10 @@ offizielle [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2
 > Gelenktests **aufhängen oder sicher lagern** (Debug-/Entwicklungsmodus laut
 > Unitree-Handbuch), Umfeld freihalten und die Funk-Fernbedienung als
 > zusätzlichen Not-Aus bereithalten. Der Button **NOT-AUS (Dämpfung)** schaltet
-> alle Motoren sofort auf reine Dämpfung (kp = 0).
+> alle Motoren sofort auf reine Dämpfung (kp = 0). Das **Verbinden ist passiv**
+> (es wird nur gelesen); Befehle fließen erst nach **Steuerung aktivieren**.
+> Fällt das LowState-Feedback während aktiver Steuerung aus, schaltet ein
+> **Watchdog** automatisch in die Dämpfung.
 
 ## Installation (Ubuntu 22.04)
 
@@ -42,17 +45,22 @@ Unitree-Repository (nicht auf PyPI verfügbar); dabei wird auch
 
 1. **Roboterprofil** wählen (oder über *Verwalten…* mehrere G1 anlegen —
    Name, Schnittstelle, DDS-Domain werden gespeichert).
-2. **Verbinden** — die App wartet auf `rt/lowstate`, gibt einen laufenden
-   High-Level-Bewegungsdienst über den `MotionSwitcherClient` frei und zeigt
-   die aktuelle Ist-Pose im 3D-Modell.
+2. **Verbinden** — die App wartet auf `rt/lowstate` und zeigt die aktuelle
+   Ist-Pose im 3D-Modell. Das Verbinden ist rein passiv: Es werden keine
+   Befehle gesendet, ein laufender High-Level-Dienst (z. B. Balance) bleibt
+   aktiv.
 3. Im 3D-Modell ein **Gelenk anklicken** (oder links in der Liste wählen) —
    rechts erscheint das Menü mit Schieberegler, Gradzahl-Eingabe und den
    offiziellen Grenzwerten. Drehen: linke Maustaste ziehen, Zoom: Mausrad,
    Verschieben: rechte Maustaste.
-4. **Steuerung aktivieren** — die aktuelle Pose wird als Sollwert übernommen
-   und gehalten (PD-Regelung, 500 Hz). Ab jetzt bewegt der Schieberegler das
-   gewählte Gelenk; Sollwerte werden auf die Gelenkgrenzen begrenzt und mit
-   maximal 0,6 rad/s angefahren (Slew-Rate-Begrenzung).
+4. **Steuerung aktivieren** — ein laufender High-Level-Bewegungsdienst wird
+   über den `MotionSwitcherClient` freigegeben (schlägt die Freigabe fehl,
+   wird die Steuerung **nicht** aktiviert), die aktuelle Pose wird als
+   Sollwert übernommen und gehalten (PD-Regelung, 500 Hz). Ab jetzt bewegt
+   der Schieberegler das gewählte Gelenk; Sollwerte werden auf die
+   Gelenkgrenzen begrenzt und mit maximal 0,6 rad/s angefahren
+   (Slew-Rate-Begrenzung). Bei ausbleibendem `rt/lowstate` schaltet der
+   Watchdog automatisch in die Dämpfung.
 5. **NOT-AUS (Dämpfung)** stoppt die Regelung sofort (kp = 0, kd > 0).
 
 Ohne Verbindung (Offline-Modus) bewegen die Regler nur das 3D-Modell —
@@ -125,8 +133,9 @@ g1control/
 ### Ansteuerung (Low-Level, wie im offiziellen Unitree-Beispiel)
 
 * `ChannelFactoryInitialize(domain, interface)` auf der Ethernet-Schnittstelle
-* `MotionSwitcherClient.ReleaseMode()` — High-Level-Dienst freigeben
 * `rt/lowstate` abonnieren (Ist-Winkel, `mode_machine`)
+* Erst bei **Steuerung aktivieren**: `MotionSwitcherClient.ReleaseMode()` —
+  High-Level-Dienst freigeben (mit Timeout und Fehlerprüfung)
 * `rt/lowcmd` mit 500 Hz: pro Motor `mode=1`, `q`, `dq=0`, `tau=0` sowie
   Kp/Kd aus dem offiziellen `g1_low_level_example`, CRC-gesichert
 

@@ -97,8 +97,9 @@ class MainWindow(QMainWindow):
         self.btn_control = QPushButton("Steuerung aktivieren")
         self.btn_control.setCheckable(True)
         self.btn_control.setToolTip(
-            "Aktiviert die Low-Level-Positionsregelung: Die aktuelle Pose "
-            "wird gehalten, danach bewegen die Schieberegler den Roboter."
+            "Aktiviert die Low-Level-Positionsregelung: Ein laufender "
+            "High-Level-Dienst wird freigegeben, die aktuelle Pose wird "
+            "gehalten, danach bewegen die Schieberegler den Roboter."
         )
         self.btn_control.clicked.connect(self._toggle_control)
         tb.addWidget(self.btn_control)
@@ -235,8 +236,16 @@ class MainWindow(QMainWindow):
     def _emergency(self) -> None:
         if self.robot is not None:
             self.robot.emergency_damp()
+            # Nicht pauschal Erfolg melden: Wenn das Senden fehlschlägt,
+            # erreicht der Dämpfungsbefehl den Roboter nicht.
+            err = self.robot.state().error
+            if err:
+                self.lbl_status.setText(f"⚠ NOT-AUS angefordert — {err}")
+            else:
+                self.lbl_status.setText("NOT-AUS: Dämpfungsmodus aktiv")
+        else:
+            self.lbl_status.setText("NOT-AUS (nicht verbunden)")
         self.btn_control.setChecked(False)
-        self.lbl_status.setText("NOT-AUS: Dämpfungsmodus aktiv")
         LOG.warning("NOT-AUS ausgelöst.")
         self._update_control_ui()
 
@@ -309,6 +318,12 @@ class MainWindow(QMainWindow):
             self.joint_panel.set_hint(
                 "" if active else
                 "Verbunden. „Steuerung aktivieren“ drücken, um Gelenke zu bewegen.")
+        # Slider/Spinbox auf den tatsächlichen Sollwert des Backends
+        # zurücksetzen: enable_control()/emergency_damp() übernehmen die
+        # Ist-Pose als Sollwert — ein stehengebliebener alter Sliderwert
+        # würde sonst beim nächsten Schritt eine große Bewegung auslösen.
+        if self.selected is not None:
+            self.joint_panel.set_target_display(self._current_target(self.selected))
 
     def _tick(self) -> None:
         if self.robot is not None:
