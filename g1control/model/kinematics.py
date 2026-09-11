@@ -109,15 +109,23 @@ class G1Kinematics:
             if node.parent is not None:
                 self.nodes[node.parent].children.append(node.name)
         self.joint_nodes = {n.joint_index: n.name for n in self.nodes.values() if n.joint_index is not None}
+        # Konstante Anteile einmal vorberechnen — forward() läuft bei jedem
+        # Repaint und muss nur noch die Gelenkrotationen einrechnen.
+        self._locals: dict[str, np.ndarray] = {}
+        for node in self.nodes.values():
+            local = np.eye(4)
+            local[:3, :3] = _rpy_matrix(*node.rpy)
+            local[:3, 3] = node.xyz
+            self._locals[node.name] = local
+        self._segments = [(self.nodes[name].parent, name)
+                          for name in self.order if self.nodes[name].parent is not None]
 
     def forward(self, q: np.ndarray) -> dict[str, np.ndarray]:
         """Berechnet die 4x4-Welttransformationen aller Knoten für Gelenkwinkel q[29]."""
         transforms: dict[str, np.ndarray] = {}
         for name in self.order:
             node = self.nodes[name]
-            local = np.eye(4)
-            local[:3, :3] = _rpy_matrix(*node.rpy)
-            local[:3, 3] = node.xyz
+            local = self._locals[name]
             if node.axis is not None and node.joint_index is not None:
                 rot = np.eye(4)
                 rot[:3, :3] = _axis_angle(node.axis, float(q[node.joint_index]))
@@ -128,8 +136,12 @@ class G1Kinematics:
                 transforms[name] = transforms[node.parent] @ local
         return transforms
 
+    @staticmethod
+    def positions_from(transforms: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {name: t[:3, 3] for name, t in transforms.items()}
+
     def positions(self, q: np.ndarray) -> dict[str, np.ndarray]:
-        return {name: t[:3, 3] for name, t in self.forward(q).items()}
+        return self.positions_from(self.forward(q))
 
     def axis_world(self, transforms: dict[str, np.ndarray], joint_index: int) -> np.ndarray:
         """Weltrichtung der Drehachse eines Gelenks (für die Achsanzeige)."""
@@ -139,9 +151,4 @@ class G1Kinematics:
 
     def segments(self) -> list[tuple[str, str]]:
         """Alle Verbindungslinien (parent -> child) für das Strichmodell."""
-        segs = []
-        for name in self.order:
-            node = self.nodes[name]
-            if node.parent is not None:
-                segs.append((node.parent, name))
-        return segs
+        return self._segments
